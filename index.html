@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<!--
+  ÁRBOL BINARIO DE EXPRESIONES ARITMÉTICAS
+  ========================================
+  Archivo único (HTML + CSS + JavaScript), sin dependencias: se abre en cualquier navegador.
+
+  Funciones:
+    1. Lee una expresión infija (operandos de 1 dígito; + - * /; paréntesis opcionales),
+       la convierte en un árbol binario y muestra el árbol y sus recorridos preorder y postorder.
+    2. Evalúa una expresión escrita en preorder (notación prefija).
+    3. Evalúa una expresión escrita en postorder (notación postfija).
+
+  Complejidad (n = número de símbolos, h = altura del árbol):
+    - Construcción del árbol: O(n) tiempo.
+    - Recorridos: O(n) tiempo, O(h) de pila de recursión.
+    - Evaluación prefija/postfija: O(n) tiempo, O(n) espacio (pila).
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Árbol binario de expresiones</title>
+<style>
+/* ---------- Diseño ---------- */
+*{box-sizing:border-box}
+body{margin:0;padding:24px 16px;background:#fff;color:#000;font:16px/1.5 system-ui,sans-serif}
+main{max-width:720px;margin:auto}
+h1{font-size:1.4rem;margin:0 0 4px}
+h2{font-size:1.05rem;margin:0 0 4px}
+.d{margin:0 0 10px;font-size:.9rem}                       /* texto de ayuda */
+section{border-top:2px solid #000;padding:16px 0;margin-top:16px}
+.row{display:flex;gap:8px}                                /* campo + botón en una fila */
+input{flex:1;min-width:0;padding:8px 10px;font:inherit;font-family:ui-monospace,Consolas,monospace;border:1px solid #000;border-radius:0;background:#fff;color:#000}
+button{padding:8px 16px;font:inherit;border:1px solid #000;border-radius:0;background:#000;color:#fff;cursor:pointer}
+button:hover{background:#fff;color:#000}                  /* se invierte al pasar el cursor */
+input:focus-visible,button:focus-visible{outline:2px solid #000;outline-offset:2px}  /* accesibilidad por teclado */
+.out{margin-top:12px}                                     /* contenedor de resultados */
+.out p{margin:4px 0}
+.err{font-weight:700;border-left:4px solid #000;padding-left:10px}  /* errores: negrita + barra (sin color) */
+code{font-family:ui-monospace,Consolas,monospace}
+.tree{overflow-x:auto}                                    /* árboles anchos: scroll horizontal */
+
+/* ---------- Árbol en SVG ---------- */
+svg line{stroke:#000;stroke-width:1.5}                    /* aristas */
+svg circle{fill:#fff;stroke:#000;stroke-width:2}          /* nodos de operando: blancos */
+svg circle.op{fill:#000}                                  /* nodos de operador: negros */
+svg text{text-anchor:middle;font:600 15px ui-monospace,Consolas,monospace;fill:#000}
+svg circle.op+text{fill:#fff}                             /* texto blanco sobre nodo negro */
+</style>
+</head>
+<body>
+<main>
+<h1>Árbol binario de expresiones</h1>
+<p class="d">Operandos de 1 dígito (0-9) y operadores + − * /. La infija admite paréntesis; las demás pueden escribirse con o sin espacios.</p>
+
+<!-- Cada sección tiene tres ids con el mismo prefijo (a, b, c):
+     "x" = campo de texto, "x-b" = botón, "x-o" = zona de salida. El script los enlaza por ese prefijo. -->
+
+<section>
+<h2>1. Expresión infija → árbol → recorridos</h2>
+<p class="d">Ejemplo: 2*(3+4)-5/(1+1)</p>
+<div class="row"><input id="a" aria-label="Expresión infija" value="3+4*2" autocomplete="off"><button id="a-b">Analizar</button></div>
+<div class="out" id="a-o"></div>
+</section>
+
+<section>
+<h2>2. Resolver expresión en preorder</h2>
+<p class="d">Ejemplo: - * 2 + 3 4 / 5 + 1 1</p>
+<div class="row"><input id="b" aria-label="Expresión en preorder" value="+ 3 * 4 2" autocomplete="off"><button id="b-b">Resolver</button></div>
+<div class="out" id="b-o"></div>
+</section>
+
+<section>
+<h2>3. Resolver expresión en postorder</h2>
+<p class="d">Ejemplo: 2 3 4 + * 5 1 1 + / -</p>
+<div class="row"><input id="c" aria-label="Expresión en postorder" value="3 4 2 * +" autocomplete="off"><button id="c-b">Resolver</button></div>
+<div class="out" id="c-o"></div>
+</section>
+</main>
+
+<script>
+/* =====================================================================
+   1. CONSTANTES Y ERRORES
+   ===================================================================== */
+const D = /^[0-9]$/;   // un único dígito (anclado: rechaza "", "12", "a")
+const O = '+-*/';      // operadores válidos
+
+/** Error de la expresión del usuario (se muestra en pantalla; otros errores sí se propagan). */
+class Err extends Error {}
+
+/* =====================================================================
+   2. ARITMÉTICA EXACTA CON FRACCIONES
+   Una fracción es el arreglo [numerador, denominador] con BigInt y d > 0.
+   Así 7/2 no pierde precisión como ocurriría con decimales binarios.
+   ===================================================================== */
+
+/** Máximo común divisor (Euclides) de dos BigInt; ignora signos. */
+const gcd = (a, b) => {
+  a = a < 0n ? -a : a;
+  b = b < 0n ? -b : b;
+  while (b) [a, b] = [b, a % b];
+  return a;
+};
+
+/** Crea la fracción n/d simplificada y con denominador positivo. */
+const fr = (n, d = 1n) => {
+  if (d < 0n) { n = -n; d = -d; }
+  const g = gcd(n, d) || 1n;       // gcd(0, d) = d, nunca 0; "|| 1n" es solo una guarda
+  return [n / g, d / g];
+};
+
+/**
+ * Aplica un operador binario sobre dos fracciones.
+ * @param {string} op  '+', '-', '*' o '/'
+ * @param {[bigint,bigint]} a  operando izquierdo
+ * @param {[bigint,bigint]} b  operando derecho
+ * @returns {[bigint,bigint]} resultado simplificado
+ * @throws {Err} si se divide entre cero
+ */
+function ap(op, [an, ad], [bn, bd]) {
+  if (op === '+') return fr(an * bd + bn * ad, ad * bd);
+  if (op === '-') return fr(an * bd - bn * ad, ad * bd);
+  if (op === '*') return fr(an * bn, ad * bd);
+  if (bn === 0n) throw new Err('división entre cero');
+  return fr(an * bd, ad * bn);     // a/b = (an/ad) / (bn/bd) = (an*bd)/(ad*bn)
+}
+
+/** Texto del resultado: entero si d = 1; si no, "n/d (≈ decimal)". */
+const fmt = ([n, d]) =>
+  d === 1n ? String(n) : `${n}/${d} (≈ ${+(Number(n) / Number(d)).toPrecision(6)})`;
+
+/* =====================================================================
+   3. ANALIZADOR SINTÁCTICO: INFIJA -> ÁRBOL BINARIO
+   Descenso recursivo. Cada nivel de la gramática fija una precedencia:
+
+       expr   := term   (('+' | '-') term)*        menor precedencia
+       term   := factor (('*' | '/') factor)*
+       factor := DÍGITO | '(' expr ')'             mayor precedencia
+
+   Los bucles `*` construyen el árbol con asociatividad izquierda:
+   8/2/2 -> ((8/2)/2). Nodo del árbol: { v: símbolo, l: hijo izq., r: hijo der. }.
+   ===================================================================== */
+
+/**
+ * Convierte una expresión infija en su árbol binario.
+ * @param {string} txt  expresión (los espacios se ignoran)
+ * @returns {{v:string,l?:object,r?:object}} raíz del árbol
+ * @throws {Err} si la expresión está mal formada
+ */
+function parse(txt) {
+  const s = txt.replace(/\s+/g, '');   // quita espacios
+  let i = 0;                           // posición actual en s
+  if (!s) throw new Err('la expresión está vacía');
+
+  /** Carácter actual sin consumirlo ('' al llegar al final). */
+  const pk = () => s[i] ?? '';
+
+  /** factor := DÍGITO | '(' expr ')' */
+  const factor = () => {
+    const c = pk();
+    if (D.test(c)) {
+      i++;
+      if (D.test(pk())) throw new Err(`solo se permiten operandos de 1 dígito (posición ${i + 1})`);
+      return { v: c };                 // hoja
+    }
+    if (c === '(') {
+      i++;
+      const n = expr();
+      if (s[i++] !== ')') throw new Err('falta cerrar un paréntesis “)”');
+      return n;                        // el paréntesis no genera nodo: solo agrupa
+    }
+    if (!c) throw new Err('la expresión termina antes de tiempo (falta un operando)');
+    throw new Err(`se esperaba un dígito o “(” y se encontró “${c}”`);
+  };
+
+  /**
+   * Fábrica de niveles binarios con asociatividad izquierda.
+   * @param {string} ops  operadores que maneja el nivel
+   * @param {Function} sub  nivel inmediato inferior de la gramática
+   */
+  const bin = (ops, sub) => () => {
+    let n = sub();
+    while (pk() && ops.includes(pk())) {   // "pk() &&": ''.includes('') sería true
+      const v = s[i++];
+      n = { v, l: n, r: sub() };           // lo ya leído pasa a ser hijo izquierdo
+    }
+    return n;
+  };
+
+  const term = bin('*/', factor);
+  const expr = bin('+-', term);
+
+  const raiz = expr();
+  if (i < s.length) throw new Err(`carácter inesperado “${s[i]}” en la posición ${i + 1}`);
+  return raiz;
+}
+
+/* =====================================================================
+   4. RECORRIDOS (O(n) tiempo; `o` es el acumulador de salida)
+   ===================================================================== */
+
+/** Preorder: raíz, izquierdo, derecho -> notación prefija. */
+function pre(n, o = []) {
+  if (n) { o.push(n.v); pre(n.l, o); pre(n.r, o); }
+  return o;
+}
+
+/** Postorder: izquierdo, derecho, raíz -> notación postfija. */
+function post(n, o = []) {
+  if (n) { post(n.l, o); post(n.r, o); o.push(n.v); }
+  return o;
+}
+
+/* =====================================================================
+   5. EVALUACIÓN DE PREORDER Y POSTORDER CON PILA
+   - Postorder: se lee de izquierda a derecha. Al llegar un operador, el primer
+     pop es el operando DERECHO y el segundo el IZQUIERDO.
+   - Preorder: se lee de derecha a izquierda (el reverso de un preorder visita
+     los operandos antes que su operador). El primer pop es el IZQUIERDO.
+   ===================================================================== */
+
+/**
+ * Separa la expresión en símbolos y valida que sean dígitos u operadores.
+ * Como los operandos son de 1 dígito, cada carácter es un símbolo.
+ * @throws {Err} ante un símbolo no válido
+ */
+function toks(t) {
+  const a = [...t].filter(c => !/\s/.test(c));
+  for (const c of a) if (!D.test(c) && !O.includes(c)) throw new Err(`símbolo no válido “${c}”`);
+  return a;
+}
+
+/**
+ * Evalúa una expresión prefija o postfija.
+ * @param {string} txt  expresión en preorder o postorder
+ * @param {boolean} prefija  true = preorder, false = postorder
+ * @returns {[bigint,bigint]} resultado como fracción
+ * @throws {Err} por operandos faltantes/sobrantes, vacío o división entre cero
+ */
+function evalPila(txt, prefija) {
+  const a = toks(txt), st = [];
+  if (prefija) a.reverse();
+  for (const t of a) {
+    if (D.test(t)) {
+      st.push(fr(BigInt(t)));                       // operando: se apila
+    } else {
+      if (st.length < 2) throw new Err(`faltan operandos para el operador “${t}”`);
+      const x = st.pop(), y = st.pop();             // x = primer pop, y = segundo pop
+      st.push(prefija ? ap(t, x, y) : ap(t, y, x)); // el orden de los operandos importa en - y /
+    }
+  }
+  if (!st.length) throw new Err('la expresión está vacía');
+  if (st.length > 1) throw new Err('expresión inválida: sobran operandos o faltan operadores');
+  return st[0];
+}
+
+/* =====================================================================
+   6. DIBUJO DEL ÁRBOL EN SVG
+   Posición: x = orden de visita inorder (evita que los nodos se encimen),
+             y = profundidad. Primero aristas y luego nodos, para que los
+             círculos tapen los extremos de las líneas.
+   ===================================================================== */
+
+/**
+ * Genera el SVG del árbol.
+ * @param {object} root  raíz devuelta por parse()
+ * @returns {string} marcado <svg>…</svg>
+ */
+function svg(root) {
+  let k = 0, maxd = 0;                  // k = contador inorder, maxd = profundidad máxima
+  const nodes = [], edges = [];
+
+  // Recorrido inorder que asigna coordenadas (x, y) a cada nodo.
+  (function lay(n, d) {
+    if (!n) return null;
+    const a = lay(n.l, d + 1);          // subárbol izquierdo
+    n.x = k++; n.y = d;                 // el nodo actual toma la siguiente columna
+    maxd = Math.max(maxd, d);
+    const b = lay(n.r, d + 1);          // subárbol derecho
+    nodes.push(n);
+    if (a) edges.push([n, a]);
+    if (b) edges.push([n, b]);
+    return n;
+  })(root, 0);
+
+  const X = n => n.x * 44 + 28;         // separación horizontal de 44 px
+  const Y = n => n.y * 56 + 26;         // separación vertical de 56 px
+
+  const L = edges.map(([p, c]) =>
+    `<line x1="${X(p)}" y1="${Y(p)}" x2="${X(c)}" y2="${Y(c)}"/>`).join('');
+  const N = nodes.map(n =>
+    `<g><circle cx="${X(n)}" cy="${Y(n)}" r="17" class="${O.includes(n.v) ? 'op' : ''}"/>` +
+    `<text x="${X(n)}" y="${Y(n) + 5}">${n.v}</text></g>`).join('');   // +5 centra el texto verticalmente
+
+  return `<svg width="${k * 44 + 12}" height="${(maxd + 1) * 56}" role="img" aria-label="Árbol binario">${L}${N}</svg>`;
+}
+
+/* =====================================================================
+   7. INTERFAZ
+   `acts` asocia el prefijo de cada sección con la función que genera su salida.
+   Es seguro usar innerHTML: la salida solo contiene dígitos, operadores y marcado
+   propio, porque la entrada ya fue validada. Los mensajes de error usan textContent.
+   ===================================================================== */
+const acts = {
+  a: t => {
+    const r = parse(t);
+    return `<div class="tree">${svg(r)}</div>` +
+           `<p><b>Preorder:</b> <code>${pre(r).join(' ')}</code></p>` +
+           `<p><b>Postorder:</b> <code>${post(r).join(' ')}</code></p>`;
+  },
+  b: t => `<b>Resultado:</b> <code>${fmt(evalPila(t, true))}</code>`,    // preorder
+  c: t => `<b>Resultado:</b> <code>${fmt(evalPila(t, false))}</code>`    // postorder
+};
+
+// Enlaza cada sección: clic en el botón o Enter en el campo; además se ejecuta al cargar.
+for (const id in acts) {
+  const o = document.getElementById(id + '-o');
+  const inp = document.getElementById(id);
+  const go = () => {
+    o.className = 'out';
+    try {
+      o.innerHTML = acts[id](inp.value);
+    } catch (e) {
+      if (!(e instanceof Err)) throw e;            // solo se capturan errores del usuario
+      o.className = 'out err';
+      o.textContent = 'Error: ' + e.message;
+    }
+  };
+  document.getElementById(id + '-b').onclick = go;
+  inp.onkeydown = e => { if (e.key === 'Enter') go(); };
+  go();
+}
+</script>
+</body>
+</html>
